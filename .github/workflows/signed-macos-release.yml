@@ -40,6 +40,8 @@ jobs:
           path: source
           fetch-depth: 0
           persist-credentials: false
+      - name: Test independent tag selection and transient network retries
+        run: python3 -m unittest discover -s signing/.github/scripts -p test_macos_distribution.py
       - name: Select an integrated upstream release tag
         id: select
         env:
