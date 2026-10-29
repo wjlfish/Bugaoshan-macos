@@ -1,7 +1,7 @@
 """Sign, notarize and verify the universal Mac app distributed outside the store.
 
-Run from the trusted signing branch, with an unsigned bundle built in a separate
-job. Credentials are passed as file paths; never print private key material.
+Run only in the personal signing repository, with an unsigned upstream bundle.
+Credentials are passed as file paths; never print private key material.
 """
 
 import argparse
@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from verify_macos_bundle import APP_GROUP, BUNDLE_ID, TEAM_ID, require, verify
@@ -84,7 +85,7 @@ def verify_developer_id(target):
 def verify_dmg(dmg, version, build):
     run("codesign", "--verify", "--strict", dmg)
     verify_developer_id(dmg)
-    run("xcrun", "stapler", "validate", dmg)
+    stapler("validate", dmg)
     run("spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=2", dmg)
     with tempfile.TemporaryDirectory(prefix="bugaoshan-dmg-check-") as temporary:
         mount = Path(temporary) / "volume"
@@ -96,7 +97,7 @@ def verify_dmg(dmg, version, build):
                 verify_developer_id(target)
                 entitlements = plistlib.loads(run("codesign", "-d", "--entitlements", ":-", target).encode())
                 require(not entitlements.get("get-task-allow"), "Debug entitlement in release")
-            run("xcrun", "stapler", "validate", app)
+            stapler("validate", app)
             run("spctl", "--assess", "--type", "execute", "--verbose=2", app)
         finally:
             run("hdiutil", "detach", mount)
@@ -108,6 +109,23 @@ def notarize(path, credentials):
                             "--wait", "--timeout", "45m", "--output-format", "json"))
     require(result.get("status") == "Accepted", f"Apple notarization failed: {result}")
     return result["id"]
+
+
+def stapler(action, path):
+    # Apple ticket downloads can fail transiently (for example NSURLError -1005).
+    # Bound retries and preserve the final failure; never ship an unstapled app.
+    for attempt in range(3):
+        try:
+            return run("xcrun", "stapler", action, path)
+        except RuntimeError:
+            if attempt == 2:
+                raise
+            print(f"Stapler attempt {attempt + 1}/3 failed for {path}; retrying...", flush=True)
+            time.sleep(10 * (attempt + 1))
+
+
+def staple(path):
+    return stapler("staple", path)
 
 
 def sign(args):
@@ -160,7 +178,7 @@ def sign(args):
         archive = Path(temporary) / "Bugaoshan.zip"
         run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, archive)
         notarize(archive, credentials)
-        run("xcrun", "stapler", "staple", app)
+        staple(app)
         staging = Path(temporary) / "image"
         staging.mkdir()
         shutil.copytree(app, staging / app.name, symlinks=True)
@@ -169,7 +187,7 @@ def sign(args):
         run("hdiutil", "create", "-volname", "不高山上", "-srcfolder", staging, "-format", "UDZO", dmg)
         run("codesign", "--sign", identity, "--keychain", args.keychain, "--timestamp", dmg)
         receipt = notarize(dmg, credentials)
-        run("xcrun", "stapler", "staple", dmg)
+        staple(dmg)
     verify_dmg(dmg, args.version, args.build)
     manifest = {"schema": 1, "source_repository": SOURCE_REPOSITORY, "source_tag": args.tag,
                 "source_sha": args.sha, "version": args.version, "build": str(args.build),

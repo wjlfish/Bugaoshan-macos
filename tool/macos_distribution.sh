@@ -1,7 +1,7 @@
 #!/bin/bash
 # Local App Store archive/export and unsigned CI input for Developer ID signing.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "${MACOS_SOURCE_DIR:-$(dirname "$0")/..}"
 
 mode="${1:-archive}"
 case "$mode" in

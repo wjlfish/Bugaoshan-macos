@@ -1,6 +1,8 @@
 name: Signed macOS distribution
 
 on:
+  schedule:
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       tag:
@@ -32,18 +34,6 @@ jobs:
         with:
           path: signing
           persist-credentials: false
-      - name: Synchronize upstream branches (keep signing branch separate)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for branch in main preview; do
-            sha=$(gh api "repos/The-Brotherhood-of-SCU/Bugaoshan/git/ref/heads/$branch" --jq .object.sha)
-            if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" >/dev/null 2>&1; then
-              gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" -f sha="$sha" -F force=false >/dev/null
-            else
-              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null
-            fi
-          done
       - uses: actions/checkout@v4
         with:
           repository: The-Brotherhood-of-SCU/Bugaoshan
@@ -55,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.tag }}
-        run: python3 signing/.github/scripts/macos_signing.py select --source source --tag "$REQUESTED_TAG"
+        run: python3 signing/.github/scripts/macos_signing.py --source source --tag "$REQUESTED_TAG"
 
   compile:
     needs: resolve
@@ -69,6 +59,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          path: signing
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: source
           repository: The-Brotherhood-of-SCU/Bugaoshan
           ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0
@@ -78,11 +73,13 @@ jobs:
           flutter-version: '3.44.9'
           channel: stable
           cache: true
-      - run: bash tool/macos_distribution.sh unsigned
+      - name: Compile upstream app without credentials
+        working-directory: source
+        run: MACOS_SOURCE_DIR="$PWD" bash ../signing/tool/macos_distribution.sh unsigned
       - uses: actions/upload-artifact@v4
         with:
           name: macos-for-signing
-          path: build/macos/validation/Bugaoshan-unsigned.zip
+          path: source/build/macos/validation/Bugaoshan-unsigned.zip
           if-no-files-found: error
           retention-days: 2
 
@@ -151,22 +148,24 @@ jobs:
             --app-profile "$RUNNER_TEMP/signing/app.provisionprofile" \
             --widget-profile "$RUNNER_TEMP/signing/widget.provisionprofile" \
             --notary-key "$RUNNER_TEMP/signing/AuthKey.p8" --output signed
-      - name: Publish staging release for upstream to verify and import
+      - name: Publish macOS release only in this personal repository
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="macos-$SOURCE_TAG"
-          if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
-            gh release delete "$tag" --yes
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
           fi
-          gh release create "$tag" --target "$GITHUB_SHA" --draft --prerelease \
-            --title "Notarized macOS $SOURCE_TAG" \
-            --notes "Developer ID DMG for The-Brotherhood-of-SCU/Bugaoshan@$SOURCE_SHA. Upstream validates source, signature and notarization before including this asset."
-          gh release upload "$tag" signed/*.dmg signed/macos-manifest.json
-          gh release edit "$tag" --draft=false --prerelease
+          opts=()
+          if [[ "$SOURCE_TAG" == *-* ]]; then opts+=(--prerelease); fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft "${opts[@]}" \
+            --title "macOS $SOURCE_TAG" \
+            --notes "Signed and Apple-notarized universal DMG. Source: https://github.com/The-Brotherhood-of-SCU/Bugaoshan/commit/$SOURCE_SHA . This personal distribution runs independently of upstream releases."
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" signed/*.dmg signed/macos-manifest.json
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false "${opts[@]}"
       - name: Remove temporary private keys
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/signing/release.keychain-db" || true
-          rm -r "$RUNNER_TEMP/signing"
+          rm -rf "$RUNNER_TEMP/signing"
